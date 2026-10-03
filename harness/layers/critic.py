@@ -79,16 +79,45 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        observed = ctx.observed_text
+        kept = []
+        split_abstain = False
+
+        def sources(text):
+            if not isinstance(text, str) or text.casefold() not in observed.casefold():
+                return []
+            normalized = text.casefold()
+            return [
+                doc.doc_id
+                for doc in (ctx.corpus.docs if ctx.corpus is not None else [])
+                if any(normalized in line.casefold() for line in doc.body.splitlines())
+            ]
+
+        for claim in claims:
+            if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
+                continue
+            text = claim["text"]
+            if text.casefold() in observed.casefold():
+                kept.append(claim)
+                continue
+            parts = text.split(" và ")
+            if len(parts) == 2:
+                left_sources = sources(parts[0])
+                right_sources = sources(parts[1])
+                if left_sources and right_sources and set(left_sources).isdisjoint(right_sources):
+                    for part, doc_id in ((parts[0], left_sources[0]), (parts[1], right_sources[0])):
+                        kept.append({"text": part, "doc_id": doc_id})
+                    split_abstain = True
+
+        report["claims"] = kept
+        report["citations"] = sorted({claim["doc_id"] for claim in kept})
+        if split_abstain:
+            report["abstain"] = True
+        if not kept:
+            report["abstain"] = True
+            report["answer"] = "Không đủ căn cứ để trả lời."
+        return report
